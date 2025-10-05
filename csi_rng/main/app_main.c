@@ -29,6 +29,8 @@
 
 #include "protocol_examples_common.h"
 
+#include "trng_csi.h"
+
 #define CONFIG_SEND_FREQUENCY 100
 #if CONFIG_IDF_TARGET_ESP32C5
 #define CSI_FORCE_LLTF 1
@@ -39,7 +41,6 @@
 #define CONFIG_GAIN_CONTROL 1
 #endif
 
-static const char *TAG = "csi_recv_router";
 typedef struct
 {
     unsigned : 32; /**< reserved */
@@ -82,80 +83,6 @@ extern void phy_fft_scale_force(bool force_en, uint8_t force_value);
  */
 extern void phy_force_rx_gain(int force_en, int force_value);
 #endif
-
-static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
-{
-    if (!info || !info->buf)
-    {
-        ESP_LOGW(TAG, "<%s> wifi_csi_cb", esp_err_to_name(ESP_ERR_INVALID_ARG));
-        return;
-    }
-
-    static int s_count = 0;
-    const wifi_pkt_rx_ctrl_t *rx_ctrl = &info->rx_ctrl;
-    wifi_pkt_rx_ctrl_phy_t *phy_info = (wifi_pkt_rx_ctrl_phy_t *)info;
-#if CONFIG_GAIN_CONTROL
-    static uint16_t agc_gain_sum = 0;
-    static uint16_t fft_gain_sum = 0;
-    static uint8_t agc_gain_force_value = 0;
-    static uint8_t fft_gain_force_value = 0;
-    if (s_count < 100)
-    {
-        agc_gain_sum += phy_info->agc_gain;
-        fft_gain_sum += phy_info->fft_gain;
-    }
-    else if (s_count == 100)
-    {
-        agc_gain_force_value = agc_gain_sum / 100;
-        fft_gain_force_value = fft_gain_sum / 100;
-#if CONFIG_FORCE_GAIN
-        phy_fft_scale_force(1, fft_gain_force_value);
-        phy_force_rx_gain(1, agc_gain_force_value);
-#endif
-        ESP_LOGI(TAG, "fft_force %d, agc_force %d", fft_gain_force_value, agc_gain_force_value);
-    }
-#endif
-
-#if CONFIG_IDF_TARGET_ESP32C5 || CONFIG_IDF_TARGET_ESP32C6
-    if (!s_count)
-    {
-        ESP_LOGI(TAG, "================ CSI RECV ================");
-        ets_printf("type,seq,mac,rssi,rate,noise_floor,fft_gain,agc_gain,channel,local_timestamp,sig_len,rx_state,len,first_word,data\n");
-    }
-    ets_printf("CSI_DATA,%d," MACSTR ",%d,%d,%d,%d,%d,%d,%d,%d,%d",
-               s_count, MAC2STR(info->mac), rx_ctrl->rssi, rx_ctrl->rate,
-               rx_ctrl->noise_floor, phy_info->fft_gain, phy_info->agc_gain, rx_ctrl->channel,
-               rx_ctrl->timestamp, rx_ctrl->sig_len, rx_ctrl->rx_state);
-#else
-    if (!s_count)
-    {
-        ESP_LOGI(TAG, "================ CSI RECV ================");
-        ets_printf("type,id,mac,rssi,rate,sig_mode,mcs,bandwidth,smoothing,not_sounding,aggregation,stbc,fec_coding,sgi,noise_floor,ampdu_cnt,channel,secondary_channel,local_timestamp,ant,sig_len,rx_state,len,first_word,data\n");
-    }
-    ets_printf("CSI_DATA,%d," MACSTR ",%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
-               s_count, MAC2STR(info->mac), rx_ctrl->rssi, rx_ctrl->rate, rx_ctrl->sig_mode,
-               rx_ctrl->mcs, rx_ctrl->cwb, rx_ctrl->smoothing, rx_ctrl->not_sounding,
-               rx_ctrl->aggregation, rx_ctrl->stbc, rx_ctrl->fec_coding, rx_ctrl->sgi,
-               rx_ctrl->noise_floor, rx_ctrl->ampdu_cnt, rx_ctrl->channel, rx_ctrl->secondary_channel,
-               rx_ctrl->timestamp, rx_ctrl->ant, rx_ctrl->sig_len, rx_ctrl->rx_state);
-#endif
-
-#if CONFIG_IDF_TARGET_ESP32C5 && CSI_FORCE_LLTF
-    ets_printf(",%d,%d,\"[%d", (info->len - 2) / 2, info->first_word_invalid, (int16_t)(((int16_t)info->buf[1]) << 12) >> 4 | (uint8_t)info->buf[0]);
-    for (int i = 2; i < (info->len - 2); i += 2)
-    {
-        ets_printf(",%d", (int16_t)(((int16_t)info->buf[i + 1]) << 12) >> 4 | (uint8_t)info->buf[i]);
-    }
-#else
-    ets_printf(",%d,%d,\"[%d", info->len, info->first_word_invalid, info->buf[0]);
-    for (int i = 1; i < info->len; i++)
-    {
-        ets_printf(",%d", info->buf[i]);
-    }
-#endif
-    ets_printf("]\"\n");
-    s_count++;
-}
 
 const char *wifi_phy_mode_to_str(wifi_phy_mode_t mode)
 {
@@ -231,7 +158,10 @@ static void wifi_csi_init()
     static wifi_ap_record_t s_ap_info = {0};
     ESP_ERROR_CHECK(esp_wifi_sta_get_ap_info(&s_ap_info));
     ESP_ERROR_CHECK(esp_wifi_set_csi_config(&csi_config));
-    ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(wifi_csi_rx_cb, s_ap_info.bssid));
+
+    trng_init();
+
+    ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(wifi_csi_rx_cb_trng, s_ap_info.bssid));
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));
 
     static wifi_phy_mode_t s_phymode = {0};
@@ -247,7 +177,7 @@ static esp_err_t wifi_ping_router_start()
     ping_config.count = ESP_PING_COUNT_INFINITE;
     ping_config.interval_ms = 1000 / CONFIG_SEND_FREQUENCY;
     ping_config.task_stack_size = 3072;
-    ping_config.data_size = 64;
+    ping_config.data_size = 16;
 
     esp_netif_ip_info_t local_ip;
     esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), &local_ip);
