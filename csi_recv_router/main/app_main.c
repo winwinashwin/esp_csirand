@@ -91,11 +91,6 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
         return;
     }
 
-    if (memcmp(info->mac, ctx, 6))
-    {
-        return;
-    }
-
     static int s_count = 0;
     const wifi_pkt_rx_ctrl_t *rx_ctrl = &info->rx_ctrl;
     wifi_pkt_rx_ctrl_phy_t *phy_info = (wifi_pkt_rx_ctrl_phy_t *)info;
@@ -162,6 +157,31 @@ static void wifi_csi_rx_cb(void *ctx, wifi_csi_info_t *info)
     s_count++;
 }
 
+const char *wifi_phy_mode_to_str(wifi_phy_mode_t mode)
+{
+    switch (mode)
+    {
+    case WIFI_PHY_MODE_LR:
+        return "Low Rate (LR)";
+    case WIFI_PHY_MODE_11B:
+        return "802.11b";
+    case WIFI_PHY_MODE_11G:
+        return "802.11g";
+    case WIFI_PHY_MODE_11A:
+        return "802.11a";
+    case WIFI_PHY_MODE_HT20:
+        return "802.11n HT20";
+    case WIFI_PHY_MODE_HT40:
+        return "802.11n HT40";
+    case WIFI_PHY_MODE_HE20:
+        return "802.11ax HE20 (Wi-Fi 6)";
+    case WIFI_PHY_MODE_VHT20:
+        return "802.11ac VHT20 (Wi-Fi 5)";
+    default:
+        return "<UNKNOWN>";
+    }
+}
+
 static void wifi_csi_init()
 {
     /**
@@ -189,13 +209,13 @@ static void wifi_csi_init()
         .acquire_csi_legacy = true,
         .acquire_csi_ht20 = true,
         .acquire_csi_ht40 = true,
-        .acquire_csi_su = false,
-        .acquire_csi_mu = false,
+        .acquire_csi_su = true,
+        .acquire_csi_mu = true,
         .acquire_csi_dcm = false,
         .acquire_csi_beamformed = false,
         .acquire_csi_he_stbc = 2,
         .val_scale_cfg = false,
-        .dump_ack_en = false,
+        .dump_ack_en = true,
         .reserved = false};
 #else
     wifi_csi_config_t csi_config = {
@@ -213,6 +233,10 @@ static void wifi_csi_init()
     ESP_ERROR_CHECK(esp_wifi_set_csi_config(&csi_config));
     ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(wifi_csi_rx_cb, s_ap_info.bssid));
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));
+
+    static wifi_phy_mode_t s_phymode = {0};
+    ESP_ERROR_CHECK(esp_wifi_sta_get_negotiated_phymode(&s_phymode));
+    ESP_LOGI(TAG, "Negotiated PHY mode: %s", wifi_phy_mode_to_str(s_phymode));
 }
 
 static esp_err_t wifi_ping_router_start()
@@ -220,10 +244,10 @@ static esp_err_t wifi_ping_router_start()
     static esp_ping_handle_t ping_handle = NULL;
 
     esp_ping_config_t ping_config = ESP_PING_DEFAULT_CONFIG();
-    ping_config.count = 0;
+    ping_config.count = ESP_PING_COUNT_INFINITE;
     ping_config.interval_ms = 1000 / CONFIG_SEND_FREQUENCY;
     ping_config.task_stack_size = 3072;
-    ping_config.data_size = 1;
+    ping_config.data_size = 64;
 
     esp_netif_ip_info_t local_ip;
     esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), &local_ip);
